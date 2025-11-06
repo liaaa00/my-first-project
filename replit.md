@@ -6,11 +6,13 @@ This is a React-TypeScript application that integrates with Lark Base (Feishu é£
 
 ## Recent Changes (2025-11-06)
 
-- Implemented complete image compression plugin with user-friendly interface
-- Added Canvas-based image resizing for independent width/height constraints
-- Implemented data safety measures to prevent attachment loss during compression
-- Added comprehensive error handling and user feedback
-- Created progress tracking with real-time statistics (compressed count, file sizes, savings)
+- **Major Redesign**: Changed from automatic batch processing to preview-based workflow
+- Implemented image preview and comparison feature (before/after)
+- Added manual selection and confirmation for image replacement
+- Removed width/height constraints (quality-only compression)
+- Added two compression modes: Current Cell and Whole Column
+- Implemented data safety: preserves non-image attachments and allows selective replacement
+- Added memory management (cleanup object URLs when cancelling)
 - Configured Vite to run on 0.0.0.0:5000 for Replit compatibility
 
 ## User Preferences
@@ -42,25 +44,30 @@ Preferred communication style: Simple, everyday language.
 
 ### Image Processing
 
-**Library:** browser-image-compression + Canvas API
+**Library:** browser-image-compression
 - Client-side image compression in the browser
-- Configurable quality (0-1 scale), maxWidth, and maxHeight parameters
-- Custom Canvas-based resizing for independent width/height constraints
+- Quality-based compression only (0.1-1.0 scale)
+- No dimensional constraints or resizing
 - No server-side processing required
 
-**Implementation Details:**
-1. **Two-stage compression:**
-   - Stage 1: Canvas API resizes images to honor both maxWidth AND maxHeight independently
-   - Stage 2: browser-image-compression applies quality-based compression
-2. **Data Safety:**
-   - Downloads all attachments (images and non-images) before updating
-   - Skips record updates if any attachment download fails
-   - Validates attachment count before saving
-   - Displays skipped records and failed images to users
-3. **Batch Processing:**
-   - Processes all records in selected attachment field
-   - Real-time progress tracking and statistics
-   - Preserves non-image attachments unchanged
+**Workflow:**
+1. **Compress & Preview:**
+   - User selects compression mode (current cell or whole column)
+   - Images are compressed and displayed side-by-side with originals
+   - Shows file size savings and compression ratio
+2. **Manual Selection:**
+   - User can select/deselect individual images for replacement
+   - "Select All" checkbox for convenience
+   - Preview shows exact before/after comparison
+3. **Safe Replacement:**
+   - Only selected images are replaced
+   - Non-image attachments are preserved
+   - Failed downloads prevent partial updates
+   - Memory cleanup on cancel/apply
+
+**Compression Modes:**
+- **Current Cell**: Compresses images in the currently selected cell
+- **Whole Column**: Compresses images in all cells of the selected attachment field
 
 **Design Decision:** Client-side compression was chosen to:
 1. Reduce server infrastructure costs

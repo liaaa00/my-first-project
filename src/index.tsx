@@ -418,7 +418,13 @@ function LoadApp() {
                 <Col span={12}>
                   <Button
                     size="large"
-                    onClick={() => setCompressedImages([])}
+                    onClick={() => {
+                      compressedImages.forEach(img => {
+                        URL.revokeObjectURL(img.originalUrl);
+                        URL.revokeObjectURL(img.compressedUrl);
+                      });
+                      setCompressedImages([]);
+                    }}
                     disabled={applying}
                     block
                   >
