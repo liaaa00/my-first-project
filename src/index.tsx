@@ -18,8 +18,8 @@ function LoadApp() {
   const [fields, setFields] = useState<IFieldMeta[]>([]);
   const [selectedField, setSelectedField] = useState<string>('');
   const [quality, setQuality] = useState<number>(0.8);
-  const [maxWidth, setMaxWidth] = useState<number>(1920);
-  const [maxHeight, setMaxHeight] = useState<number>(1920);
+  const [maxWidth, setMaxWidth] = useState<number | null>(null);
+  const [maxHeight, setMaxHeight] = useState<number | null>(null);
   const [compressing, setCompressing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info' | 'warning', text: string } | null>(null);
@@ -59,16 +59,42 @@ function LoadApp() {
   const compressImage = async (file: File): Promise<File> => {
     return new Promise(async (resolve, reject) => {
       try {
+        const needResize = maxWidth || maxHeight;
+        
+        if (!needResize) {
+          const options = {
+            maxSizeMB: 10,
+            useWebWorker: true,
+            initialQuality: quality
+          };
+          
+          try {
+            const compressedFile = await imageCompression(file, options);
+            resolve(compressedFile);
+          } catch (error) {
+            reject(error);
+          }
+          return;
+        }
+        
         const img = new Image();
         const reader = new FileReader();
         
         reader.onload = (e) => {
           img.onload = async () => {
             let { width, height } = img;
+            let shouldResize = false;
             
-            if (width > maxWidth || height > maxHeight) {
-              const widthRatio = maxWidth / width;
-              const heightRatio = maxHeight / height;
+            if (maxWidth && width > maxWidth) {
+              shouldResize = true;
+            }
+            if (maxHeight && height > maxHeight) {
+              shouldResize = true;
+            }
+            
+            if (shouldResize) {
+              const widthRatio = maxWidth ? maxWidth / width : Infinity;
+              const heightRatio = maxHeight ? maxHeight / height : Infinity;
               const ratio = Math.min(widthRatio, heightRatio);
               width = Math.round(width * ratio);
               height = Math.round(height * ratio);
@@ -346,7 +372,8 @@ function LoadApp() {
                   max={4096}
                   step={100}
                   value={maxWidth}
-                  onChange={(value) => setMaxWidth(value || 1920)}
+                  onChange={(value) => setMaxWidth(value || null)}
+                  placeholder="不限制"
                   disabled={compressing}
                 />
               </Col>
@@ -358,7 +385,8 @@ function LoadApp() {
                   max={4096}
                   step={100}
                   value={maxHeight}
-                  onChange={(value) => setMaxHeight(value || 1920)}
+                  onChange={(value) => setMaxHeight(value || null)}
+                  placeholder="不限制"
                   disabled={compressing}
                 />
               </Col>
@@ -447,9 +475,10 @@ function LoadApp() {
               <ul style={{ margin: 0, paddingLeft: 20 }}>
                 <li>选择包含图片的附件字段</li>
                 <li>设置压缩质量（0.1-1.0，越小文件越小但质量越低）</li>
-                <li>设置最大宽度和高度（超过的图片会按比例缩放）</li>
+                <li>可选：设置最大宽度和高度（超过的图片会按比例缩放，留空则不限制尺寸）</li>
                 <li>点击"开始批量压缩"处理所有记录中的图片</li>
                 <li>压缩后的图片会替换原图片</li>
+                <li>注意：如果某条记录的附件下载失败，该记录会被跳过以保证数据完整性</li>
               </ul>
             }
             type="info"
