@@ -23,12 +23,16 @@ function LoadApp() {
   const [compressing, setCompressing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info' | 'warning', text: string } | null>(null);
-  const [stats, setStats] = useState<{ total: number, compressed: number, originalSize: number, compressedSize: number }>({
+  const [stats, setStats] = useState<{ total: number, compressed: number, failed: number, skipped: number, originalSize: number, compressedSize: number }>({
     total: 0,
     compressed: 0,
+    failed: 0,
+    skipped: 0,
     originalSize: 0,
     compressedSize: 0
   });
+  const [failedImages, setFailedImages] = useState<string[]>([]);
+  const [skippedRecords, setSkippedRecords] = useState<number>(0);
 
   useEffect(() => {
     loadAttachmentFields();
@@ -53,20 +57,72 @@ function LoadApp() {
   };
 
   const compressImage = async (file: File): Promise<File> => {
-    const options = {
-      maxSizeMB: 10,
-      maxWidthOrHeight: Math.max(maxWidth, maxHeight),
-      useWebWorker: true,
-      initialQuality: quality
-    };
-    
-    try {
-      const compressedFile = await imageCompression(file, options);
-      return compressedFile;
-    } catch (error) {
-      console.error('压缩图片失败:', error);
-      throw error;
-    }
+    return new Promise(async (resolve, reject) => {
+      try {
+        const img = new Image();
+        const reader = new FileReader();
+        
+        reader.onload = (e) => {
+          img.onload = async () => {
+            let { width, height } = img;
+            
+            if (width > maxWidth || height > maxHeight) {
+              const widthRatio = maxWidth / width;
+              const heightRatio = maxHeight / height;
+              const ratio = Math.min(widthRatio, heightRatio);
+              width = Math.round(width * ratio);
+              height = Math.round(height * ratio);
+            }
+            
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            
+            if (!ctx) {
+              reject(new Error('无法创建 canvas context'));
+              return;
+            }
+            
+            ctx.drawImage(img, 0, 0, width, height);
+            
+            canvas.toBlob(
+              async (blob) => {
+                if (!blob) {
+                  reject(new Error('无法创建 blob'));
+                  return;
+                }
+                
+                const resizedFile = new File([blob], file.name, { type: file.type });
+                
+                const options = {
+                  maxSizeMB: 10,
+                  useWebWorker: true,
+                  initialQuality: quality
+                };
+                
+                try {
+                  const compressedFile = await imageCompression(resizedFile, options);
+                  resolve(compressedFile);
+                } catch (error) {
+                  reject(error);
+                }
+              },
+              file.type,
+              quality
+            );
+          };
+          
+          img.onerror = () => reject(new Error('图片加载失败'));
+          img.src = e.target?.result as string;
+        };
+        
+        reader.onerror = () => reject(new Error('文件读取失败'));
+        reader.readAsDataURL(file);
+      } catch (error) {
+        reject(error);
+      }
+    });
   };
 
   const handleCompress = async () => {
@@ -78,7 +134,9 @@ function LoadApp() {
     setCompressing(true);
     setProgress(0);
     setMessage(null);
-    setStats({ total: 0, compressed: 0, originalSize: 0, compressedSize: 0 });
+    setStats({ total: 0, compressed: 0, failed: 0, skipped: 0, originalSize: 0, compressedSize: 0 });
+    setFailedImages([]);
+    setSkippedRecords(0);
 
     try {
       const table = await bitable.base.getActiveTable();
@@ -87,8 +145,11 @@ function LoadApp() {
 
       let totalImages = 0;
       let compressedImages = 0;
+      let failedCount = 0;
+      let skippedRecordCount = 0;
       let totalOriginalSize = 0;
       let totalCompressedSize = 0;
+      const failed: string[] = [];
 
       for (let i = 0; i < recordIdList.length; i++) {
         const recordId = recordIdList[i];
@@ -96,44 +157,90 @@ function LoadApp() {
 
         if (cellValue && Array.isArray(cellValue) && cellValue.length > 0) {
           const urls = await field.getAttachmentUrls(recordId);
+          const updatedFiles: File[] = [];
+          let hasChanges = false;
+          let hasError = false;
           
           for (let j = 0; j < cellValue.length; j++) {
             const attachment = cellValue[j];
-            if (attachment.type && attachment.type.startsWith('image/')) {
-              totalImages++;
+            const url = urls[j];
+            
+            if (!url) {
+              hasError = true;
+              break;
+            }
+            
+            try {
+              const response = await fetch(url);
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+              }
+              const blob = await response.blob();
               
-              try {
-                const url = urls[j];
-                if (!url) continue;
+              if (attachment.type && attachment.type.startsWith('image/')) {
+                totalImages++;
                 
-                const response = await fetch(url);
-                const blob = await response.blob();
-                const originalFile = new File([blob], attachment.name, { type: attachment.type });
-                
-                totalOriginalSize += originalFile.size;
+                try {
+                  const originalFile = new File([blob], attachment.name, { type: attachment.type });
+                  totalOriginalSize += originalFile.size;
 
-                const compressedFile = await compressImage(originalFile);
-                totalCompressedSize += compressedFile.size;
+                  const compressedFile = await compressImage(originalFile);
+                  totalCompressedSize += compressedFile.size;
 
-                const fileList = await bitable.base.batchUploadFile([compressedFile]);
-                
-                if (fileList && fileList.length > 0) {
-                  const newAttachments = cellValue.map(att => 
-                    att.token === attachment.token ? fileList[0] : att
-                  );
-                  
-                  await field.setValue(recordId, newAttachments as any);
+                  updatedFiles.push(compressedFile);
+                  hasChanges = true;
                   compressedImages++;
                   
                   setStats({
                     total: totalImages,
                     compressed: compressedImages,
+                    failed: failedCount,
+                    skipped: skippedRecordCount,
+                    originalSize: totalOriginalSize,
+                    compressedSize: totalCompressedSize
+                  });
+                } catch (error) {
+                  console.error(`压缩图片失败 (${attachment.name}):`, error);
+                  const originalFile = new File([blob], attachment.name, { type: attachment.type });
+                  updatedFiles.push(originalFile);
+                  failedCount++;
+                  failed.push(attachment.name);
+                  setStats({
+                    total: totalImages,
+                    compressed: compressedImages,
+                    failed: failedCount,
+                    skipped: skippedRecordCount,
                     originalSize: totalOriginalSize,
                     compressedSize: totalCompressedSize
                   });
                 }
+              } else {
+                const file = new File([blob], attachment.name, { type: attachment.type || 'application/octet-stream' });
+                updatedFiles.push(file);
+              }
+            } catch (error) {
+              console.error(`下载附件失败 (${attachment.name}):`, error);
+              hasError = true;
+              break;
+            }
+          }
+          
+          if (hasError) {
+            skippedRecordCount++;
+            setSkippedRecords(skippedRecordCount);
+            console.warn(`跳过记录 ${recordId}：部分附件下载失败`);
+          } else if (hasChanges && updatedFiles.length > 0) {
+            if (updatedFiles.length !== cellValue.length) {
+              console.warn(`跳过记录 ${recordId}：附件数量不匹配`);
+              skippedRecordCount++;
+              setSkippedRecords(skippedRecordCount);
+            } else {
+              try {
+                await field.setValue(recordId, updatedFiles);
               } catch (error) {
-                console.error(`压缩图片失败 (${attachment.name}):`, error);
+                console.error(`更新记录失败 (${recordId}):`, error);
+                skippedRecordCount++;
+                setSkippedRecords(skippedRecordCount);
               }
             }
           }
@@ -141,11 +248,23 @@ function LoadApp() {
 
         setProgress(Math.round(((i + 1) / recordIdList.length) * 100));
       }
+      
+      setFailedImages(failed);
 
-      setMessage({ 
-        type: 'success', 
-        text: `成功压缩 ${compressedImages} 张图片！原始大小: ${formatBytes(totalOriginalSize)}, 压缩后: ${formatBytes(totalCompressedSize)}, 节省: ${formatBytes(totalOriginalSize - totalCompressedSize)}` 
-      });
+      if (totalImages === 0) {
+        setMessage({ type: 'info', text: '未找到任何图片' });
+      } else if (failedCount > 0 || skippedRecordCount > 0) {
+        let msg = `压缩完成！成功: ${compressedImages} 张`;
+        if (failedCount > 0) msg += `，失败: ${failedCount} 张`;
+        if (skippedRecordCount > 0) msg += `，跳过记录: ${skippedRecordCount} 条`;
+        msg += `。原始大小: ${formatBytes(totalOriginalSize)}, 压缩后: ${formatBytes(totalCompressedSize)}, 节省: ${formatBytes(totalOriginalSize - totalCompressedSize)}`;
+        setMessage({ type: 'warning', text: msg });
+      } else {
+        setMessage({ 
+          type: 'success', 
+          text: `成功压缩 ${compressedImages} 张图片！原始大小: ${formatBytes(totalOriginalSize)}, 压缩后: ${formatBytes(totalCompressedSize)}, 节省: ${formatBytes(totalOriginalSize - totalCompressedSize)}` 
+        });
+      }
     } catch (error) {
       console.error('批量压缩失败:', error);
       setMessage({ type: 'error', text: '批量压缩过程中出现错误' });
@@ -252,7 +371,19 @@ function LoadApp() {
               <Progress percent={progress} status="active" style={{ marginTop: 8 }} />
               {stats.total > 0 && (
                 <div style={{ marginTop: 8 }}>
-                  <Text>已处理: {stats.compressed} / {stats.total} 张图片</Text>
+                  <Text>已压缩: {stats.compressed} / {stats.total} 张图片</Text>
+                  {stats.failed > 0 && (
+                    <>
+                      <br />
+                      <Text type="danger">失败: {stats.failed} 张</Text>
+                    </>
+                  )}
+                  {stats.skipped > 0 && (
+                    <>
+                      <br />
+                      <Text type="warning">跳过记录: {stats.skipped} 条</Text>
+                    </>
+                  )}
                   <br />
                   <Text>原始大小: {formatBytes(stats.originalSize)}</Text>
                   <br />
@@ -269,6 +400,34 @@ function LoadApp() {
 
           {message && (
             <Alert message={message.text} type={message.type} showIcon closable onClose={() => setMessage(null)} />
+          )}
+
+          {failedImages.length > 0 && (
+            <Alert
+              message={`以下 ${failedImages.length} 张图片压缩失败`}
+              description={
+                <div style={{ maxHeight: 150, overflow: 'auto' }}>
+                  {failedImages.map((name, index) => (
+                    <div key={index}>• {name}</div>
+                  ))}
+                </div>
+              }
+              type="error"
+              showIcon
+              closable
+              onClose={() => setFailedImages([])}
+            />
+          )}
+
+          {skippedRecords > 0 && (
+            <Alert
+              message={`跳过了 ${skippedRecords} 条记录`}
+              description="这些记录因附件下载失败或更新失败而被跳过，以确保数据完整性。您可以稍后重试这些记录。"
+              type="warning"
+              showIcon
+              closable
+              onClose={() => setSkippedRecords(0)}
+            />
           )}
 
           <Button
